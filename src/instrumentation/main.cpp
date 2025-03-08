@@ -1,25 +1,34 @@
 #include <iostream>
 
-#include <llvm/Bitcode/BitcodeReader.h>
-#include <llvm/IRReader/IRReader.h>
-#include <llvm/IR/LLVMContext.h>
-#include <llvm/IR/Module.h>
-#include <llvm/Support/SourceMgr.h>
-#include <llvm/Support/raw_ostream.h>
+#include "instrumentation/AccessInstrumenter.hpp"
+#include "instrumentation/CliArguments.hpp"
 
-int main() {
-    // Attempt to load LLVM module from file.
-    llvm::LLVMContext context;
-    llvm::SMDiagnostic err;
-    std::unique_ptr<llvm::Module> mod = llvm::parseIRFile("somefile.txt", err, context);
-
-    // If we failed to load the LLVM IR, report an error.
-    if (!mod) {
-        std::string errMsg;
-        llvm::raw_string_ostream outStr(errMsg);
-        err.print("unk", outStr);
-        std::cout << errMsg;
+int main(int argc, char** argv) {
+    // Parse CLI arguments.
+    auto argsRes = nxsan::CliArguments::Parse(argc, argv);
+    if (argsRes.HasError()) {
+        std::cout << "Failed to parse CLI arguments: " << argsRes.Error() << std::endl;
         return 1;
+    }
+    auto args = argsRes.Result();
+
+    // For each input file, attempt to parse LLVM.
+    for (auto& inputFile : args.GetInputFiles()) {
+        // Create instrumenter, run it on input file.
+        nxsan::AccessInstrumenter acins(inputFile);
+        auto result = acins.GenerateIR();
+
+        // If there was an error instrumenting, report that.
+        if (result.HasError()) {
+            std::cout << "nxsan-instrumentation-cxx: " << result.Error() << std::endl;
+            continue;
+        }
+
+        // Output module.
+        std::cout << result.Result().ir << std::endl;
+        std::cout << std::endl;
+        std::cout << "Instrumented " << result.Result().numLoads << " loads." << std::endl;
+        std::cout << "Instrumented " << result.Result().numStores << " stores." << std::endl;
     }
 
     return 0;

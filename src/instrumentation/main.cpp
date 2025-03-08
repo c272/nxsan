@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
 
     // Write the IR to file.
     {
-      std::ofstream ostr(outPath);
+      std::ofstream ostr(outPath, std::ios::trunc);
       if (!ostr.is_open()) {
         std::cout << "nxsan-instrumentation-cxx: Failed to open output file stream." << std::endl;
         continue;

@@ -35,9 +35,11 @@ target_link_libraries(${NXSAN_INS_TARGET} ${llvm_libs})
 # Configure target for runtime library.
 set(NXSAN_RT_TARGET nxsan-rt)
 add_library(${NXSAN_RT_TARGET}
+  src/runtime/nxsan_bt.cpp
   src/runtime/nxsan_init.cpp
   src/runtime/nxsan_malloc.cpp
   src/runtime/nxsan_report.cpp
+  src/runtime/nxsan_utils.cpp
 )
 target_include_directories(${NXSAN_RT_TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(${NXSAN_RT_TARGET} PRIVATE -Wno-attributes)

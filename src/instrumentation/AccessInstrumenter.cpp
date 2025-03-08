@@ -40,6 +40,12 @@ NxsResult<InstrumentedIr, std::string> AccessInstrumenter::GenerateIR() {
   // Iterate over all BB instructions, instrument them.
   for (auto mit = m_mod->begin(); mit != m_mod->end(); ++mit) {
     llvm::Function &func = *mit;
+
+    // Ignore all internal nxsan functions.
+    if (func.hasName() && func.getName().contains("__nxsan")) {
+      continue;
+    }
+
     for (auto fit = func.begin(); fit != func.end(); ++fit) {
       llvm::BasicBlock &bb = *fit;
       for (auto bbit = bb.begin(); bbit != bb.end(); ++bbit) {

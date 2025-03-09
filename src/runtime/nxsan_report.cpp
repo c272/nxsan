@@ -16,7 +16,7 @@ __nxsan_verify_access(void *ptr, uint8_t len) {
 
   // Any pointers (even those with no tags) are not allowed
   // to access the null page of memory (0x0-PAGE_SIZE).
-  if ((uint64_t)ptr <__NXSAN_PAGE_SIZE_BYTES) {
+  if ((uint64_t)ptr < __NXSAN_PAGE_SIZE_BYTES) {
     return __NXSAN_PTR_NULLPAGE;
   }
 
@@ -36,9 +36,15 @@ __nxsan_verify_access(void *ptr, uint8_t len) {
     return __NXSAN_PTR_OK;
   }
 
+  // If the shadow tag is zero, this is unreserved memory.
+  // Possible use-after-free.
+  if (shadowTag == 0) {
+    return __NXSAN_PTR_FREED;
+  }
+
   // If the shadow tag cannot be a short granule, the pointer is out of
   // bounds for the original tag granule.
-  if (shadowTag == 0 || shadowTag >= __NXSAN_TAG_GRANULARITY_BYTES) {
+  if (shadowTag >= __NXSAN_TAG_GRANULARITY_BYTES) {
     return __NXSAN_PTR_BADTAG;
   }
 
@@ -99,6 +105,14 @@ __nxsan_report_access(void *ptr, uint8_t size, uint8_t accessType) {
         ptr,
         "Tag mismatch for heap memory access (attempted %s of %u bytes) "
         "(nxsan-tag-mismatch).",
+        __nxsan_get_access_type_name(accessType), size);
+    return;
+
+  case __NXSAN_PTR_FREED:
+    __nxsan_abort_with_access_err(
+        ptr,
+        "Access to unallocated memory (attempted %s of %u bytes) "
+        "(nxsan-use-after-free).",
         __nxsan_get_access_type_name(accessType), size);
     return;
 

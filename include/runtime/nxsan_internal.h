@@ -49,7 +49,21 @@ static_assert(__NXSAN_TAG_GRANULARITY_BYTES >= alignof(std::max_align_t),
 #define __NXSAN_PTR_OUT_OF_HEAP 3
 #define __NXSAN_PTR_OVERRUN     4
 #define __NXSAN_PTR_NULLPAGE    5
+#define __NXSAN_PTR_FREED       6
 // clang-format on
+
+// Internal allocation functions.
+// Note: Allocation functions set for the below defines should be guaranteed to
+// allocate within the tracked heap memory region, otherwise undefined behavior will occur.
+#ifndef __NXSAN_INTERNAL_ALIGNED_ALLOC
+#define __NXSAN_INTERNAL_ALIGNED_ALLOC std::aligned_alloc
+#endif
+#ifndef __NXSAN_INTERNAL_CALLOC
+#define __NXSAN_INTERNAL_CALLOC std::calloc
+#endif
+#ifndef __NXSAN_INTERNAL_FREE
+#define __NXSAN_INTERNAL_FREE std::free
+#endif
 
 /**************************
  * Global shadow storage. *

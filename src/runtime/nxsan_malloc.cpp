@@ -5,6 +5,13 @@
 #include <cstdint>
 #include <cstdlib>
 
+// Allocation byte size threshold for avoiding tag values of <TG.
+// When tag values are <TG, detection of use-after-free becomes very difficult
+// when application code accesses past the first granule of the freed
+// allocation. We can somewhat mitigate the effects of this by avoiding small
+// tag values for large allocations.
+#define __NXSAN_AVOID_SMALL_TAG_THRESH 256
+
 // Tag generator logic.
 static std::random_device __nxsan_rd;
 static std::mt19937 __nxsan_mt_gen;
@@ -16,12 +23,40 @@ void __nxsan_init_tag_gen() {
       std::uniform_int_distribution<short>(1, __NXSAN_TAG_MAX_VAL);
 }
 
-// Generates an N-bit tag for use as a pointer tag.
+// Generates an N-bit pointer tag for the given allocation.
 //   - Tag bits are stored in the bottom N bits of the returned value.
 //   - Possible values are between 1-255.
+// Guaranteed to generate a tag which is different to the preceeding and
+// proceeding shadow memory regions.
 static inline __attribute__((always_inline)) uint8_t
-__nxsan_generate_tag(void) {
-  return ((uint8_t)__nxsan_tag_dist(__nxsan_mt_gen));
+__nxsan_generate_tag(void *ptr, size_t size) {
+  // Fetch the shadow tag preceding this alloc.
+  uint8_t *prevShadowPtr = __nxsan_get_shadow_address(ptr) - 1;
+  uint8_t prevShadowTag = 0;
+  if (prevShadowPtr >= __nxsan_shadow) {
+    prevShadowTag = *prevShadowPtr;
+  }
+
+  // Fetch the shadow tag following this alloc.
+  uint8_t *allocTail = (uint8_t *)ptr + size;
+  uint8_t *nextShadowPtr = __nxsan_get_shadow_address(allocTail) + 1;
+  uint8_t nextShadowTag = 0;
+  if (nextShadowPtr < __nxsan_shadow + __nxsan_shadow_size) {
+    nextShadowTag = *nextShadowPtr;
+  }
+
+  // Determine whether we must avoid small tag values for this alloc.
+  bool avoidSmallTag = size >= __NXSAN_AVOID_SMALL_TAG_THRESH;
+
+  // Generate tag, ensuring it is not the same as the prior/next tag.
+  // If the tag is <TG and we must avoid small tags, also re-generate.
+  uint8_t tag;
+  do {
+    tag = ((uint8_t)__nxsan_tag_dist(__nxsan_mt_gen));
+  } while (tag == prevShadowTag || tag == nextShadowTag ||
+           (avoidSmallTag && tag < __NXSAN_TAG_GRANULARITY_BYTES));
+
+  return tag;
 }
 
 // Updates shadow memory to reflect the given tagged allocation for a set size.
@@ -58,6 +93,47 @@ __nxsan_set_shadow_tag(void *ptr, size_t size, size_t allocated) {
   }
 }
 
+// Clears the shadow tag in memory for the given pointer.
+// Since we don't know the size of the allocation at the point of free, we must
+// make some concessions on how accurate we can be about clearing tagged shadow
+// memory.
+//  * We cannot clear trailing short granules in >1 granule allocations, as this
+//    is just as likely to be the next tag in allocated memory.
+//  * We cannot clear past the first granule if the tag value is <TG, as it is
+//    possible the next value is a short granule which equals the current tag.
+//  * We *can* clear up until the tag value changes if the tag is >=TG, as
+//    consecutive tags are guaranteed to differ meaning two identical tags will
+//    never line up in shadow memory.
+// To combat the above limitations, for larger allocations we deliberately avoid
+// tag values between 1 and TG-1 (threshold configurable above).
+static inline __attribute__((always_inline)) void
+__nxsan_clear_shadow_tag(void *ptr, uint8_t tag) {
+  // Clear the tag value of the first granule.
+  uint8_t *shadowAddr = __nxsan_get_shadow_address(ptr);
+  uint8_t origTag = *shadowAddr;
+  *shadowAddr = 0x0;
+
+  // If the original tag was a short tag, the allocation was <TG bytes.
+  // Thus, we have cleared all of the relevant shadow bytes.
+  if (origTag != tag) {
+    return;
+  }
+
+  // If the tag is <TG, we cannot do anything more (see above).
+  if (tag < __NXSAN_TAG_GRANULARITY_BYTES) {
+    return;
+  }
+
+  // Clear up until the tag value differs. We also can't clear our own final
+  // short granule, so don't bother checking for that.
+  ++shadowAddr;
+  while (shadowAddr < __nxsan_shadow + __nxsan_shadow_size &&
+         *shadowAddr == tag) {
+    *shadowAddr = 0x0;
+    ++shadowAddr;
+  }
+}
+
 extern "C" void *__nxsan_malloc(size_t size) {
   if (!__nxsan_check_init()) {
     // Not initialised, cannot malloc.
@@ -80,7 +156,8 @@ extern "C" void *__nxsan_malloc(size_t size) {
   // allocated granule.
   size_t alignedSize = size + __NXSAN_TAG_GRANULARITY_BYTES -
                        (size % __NXSAN_TAG_GRANULARITY_BYTES);
-  void *ptr = std::aligned_alloc(__NXSAN_TAG_GRANULARITY_BYTES, alignedSize);
+  void *ptr = __NXSAN_INTERNAL_ALIGNED_ALLOC(__NXSAN_TAG_GRANULARITY_BYTES,
+                                             alignedSize);
   if (!ptr) {
     // Failed to allocate memory.
     __nxsan_abort_with_err("Failed to allocate memory of size %zu (real "
@@ -101,7 +178,7 @@ extern "C" void *__nxsan_malloc(size_t size) {
   }
 
   // Generate a random tag for the pointer, update shadow memory.
-  uint8_t tag = __nxsan_generate_tag();
+  uint8_t tag = __nxsan_generate_tag(ptr, size);
   ptr = __NXSAN_EMPLACE_TAG(ptr, tag);
 
   // Update shadow memory for the given tag.
@@ -121,7 +198,7 @@ extern "C" void __nxsan_free(void *ptr) {
 
   // Is the given pointer within the heap bounds?
   void *ptrNoTag = __NXSAN_REMOVE_TAG(ptr);
-  if (!__nxsan_ptr_in_heap_bounds(ptr)) {
+  if (!__nxsan_ptr_in_heap_bounds(ptrNoTag)) {
     __nxsan_abort_with_access_err(ptr,
                                   "Attempted to free pointer outside of heap "
                                   "bounds [%p, %p) (nxsan-oob-free).",
@@ -152,11 +229,18 @@ extern "C" void __nxsan_free(void *ptr) {
   if (result != __NXSAN_PTR_OK) {
     switch (result) {
     case __NXSAN_PTR_NOTAG:
+      __nxsan_abort_with_access_err(
+          ptr, "Attempted to free memory with no tag (nxsan-notag-free).");
       return;
 
     case __NXSAN_PTR_BADTAG:
       __nxsan_abort_with_access_err(
-          ptr, "Attempted to free with stale pointer (nxsan-double-free).");
+          ptr, "Attempted to free memory with bad tag (nxsan-badtag-free).");
+      return;
+
+    case __NXSAN_PTR_FREED:
+      __nxsan_abort_with_access_err(
+          ptr, "Attempted to free unallocated memory (nxsan-double-free).");
       return;
 
     // Attempted to free from the null page.
@@ -181,5 +265,9 @@ extern "C" void __nxsan_free(void *ptr) {
   }
 
   // Free the underlying heap memory.
-  std::free(ptrNoTag);
+  __NXSAN_INTERNAL_FREE(ptrNoTag);
+
+  // Remove the tag in shadow memory (set to 0x0).
+  // This isn't perfect, see function comment for details.
+  __nxsan_clear_shadow_tag(ptrNoTag, tag);
 }

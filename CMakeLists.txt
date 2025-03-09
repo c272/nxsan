@@ -43,3 +43,34 @@ add_library(${NXSAN_RT_TARGET}
 )
 target_include_directories(${NXSAN_RT_TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(${NXSAN_RT_TARGET} PRIVATE -Wno-attributes)
+
+# Configure tests.
+option(BUILD_NXSAN_TESTS "Builds tests for verifying nxsan." OFF)
+if (BUILD_NXSAN_TESTS)
+  # Turn off useless googletest elements.
+  set(BUILD_GMOCK OFF)
+  set(INSTALL_GTEST OFF)
+  set(GTEST_HAS_ABSL OFF)
+
+  # For Windows: Prevent overriding the parent project's compiler/linker settings
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  add_subdirectory(thirdparty/googletest)
+
+  # Testing on.
+  enable_testing()
+
+  # Configure test target.
+  set(NXSAN_TESTS nxsan-tests)
+  add_executable(${NXSAN_TESTS}
+      tests/runtime/init_tests.cpp
+      tests/runtime/malloc_tests.cpp
+      tests/runtime/report_tests.cpp
+  )
+  target_include_directories(${NXSAN_TESTS} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_compile_options(${NXSAN_TESTS} PRIVATE -Wno-attributes)
+  target_link_libraries(${NXSAN_TESTS} ${NXSAN_RT_TARGET} GTest::gtest_main)
+
+  # Discover tests.
+  include(GoogleTest)
+  gtest_discover_tests(${NXSAN_TESTS})
+endif()
